@@ -1,0 +1,190 @@
+Intel(R) Advisor can now assist with vectorization and show optimization
+  report messages with your source code.
+See "https://software.intel.com/en-us/intel-advisor-xe" for details.
+
+
+Begin optimization report for: arrayMax(const float *, int)
+
+    Report from: Vector optimizations [vec]
+
+
+LOOP BEGIN at tools/util.cc(13,3)
+<Peeled loop for vectorization>
+LOOP END
+
+LOOP BEGIN at tools/util.cc(13,3)
+   remark #15300: LOOP WAS VECTORIZED
+LOOP END
+
+LOOP BEGIN at tools/util.cc(13,3)
+<Remainder loop for vectorization>
+LOOP END
+===========================================================================
+
+Begin optimization report for: arrayMaxSum(const float *, int)
+
+    Report from: Vector optimizations [vec]
+
+
+LOOP BEGIN at tools/util.cc(24,3)
+<Peeled loop for vectorization>
+LOOP END
+
+LOOP BEGIN at tools/util.cc(24,3)
+   remark #15300: LOOP WAS VECTORIZED
+LOOP END
+
+LOOP BEGIN at tools/util.cc(24,3)
+<Remainder loop for vectorization>
+LOOP END
+===========================================================================
+
+Begin optimization report for: arraySum(const float *, int)
+
+    Report from: Vector optimizations [vec]
+
+
+LOOP BEGIN at tools/util.cc(35,3)
+<Peeled loop for vectorization>
+LOOP END
+
+LOOP BEGIN at tools/util.cc(35,3)
+   remark #15300: LOOP WAS VECTORIZED
+LOOP END
+
+LOOP BEGIN at tools/util.cc(35,3)
+<Remainder loop for vectorization>
+   remark #15301: REMAINDER LOOP WAS VECTORIZED
+LOOP END
+
+LOOP BEGIN at tools/util.cc(35,3)
+<Remainder loop for vectorization>
+LOOP END
+===========================================================================
+
+Begin optimization report for: arrayInflationR2(const float *, int, float *)
+
+    Report from: Vector optimizations [vec]
+
+
+LOOP BEGIN at tools/util.cc(42,3)
+<Peeled loop for vectorization>
+LOOP END
+
+LOOP BEGIN at tools/util.cc(42,3)
+   remark #15300: LOOP WAS VECTORIZED
+LOOP END
+
+LOOP BEGIN at tools/util.cc(42,3)
+<Alternate Alignment Vectorized Loop>
+LOOP END
+
+LOOP BEGIN at tools/util.cc(42,3)
+<Remainder loop for vectorization>
+   remark #15301: REMAINDER LOOP WAS VECTORIZED
+LOOP END
+
+LOOP BEGIN at tools/util.cc(42,3)
+<Remainder loop for vectorization>
+LOOP END
+===========================================================================
+
+Begin optimization report for: arrayThreshPruneNormalize(float, const int *, const float *, int *, int *, float *)
+
+    Report from: Vector optimizations [vec]
+
+
+LOOP BEGIN at tools/util.cc(52,2)
+   remark #25460: No loop optimizations reported
+LOOP END
+
+LOOP BEGIN at tools/util.cc(61,2)
+<Peeled loop for vectorization>
+LOOP END
+
+LOOP BEGIN at tools/util.cc(61,2)
+   remark #15300: LOOP WAS VECTORIZED
+LOOP END
+
+LOOP BEGIN at tools/util.cc(61,2)
+<Remainder loop for vectorization>
+   remark #15301: REMAINDER LOOP WAS VECTORIZED
+LOOP END
+
+LOOP BEGIN at tools/util.cc(61,2)
+<Remainder loop for vectorization>
+LOOP END
+===========================================================================
+
+Begin optimization report for: prefixSumToCounts(const int *, int, int *)
+
+    Report from: Vector optimizations [vec]
+
+
+LOOP BEGIN at tools/util.cc(118,3)
+<Peeled loop for vectorization, Multiversioned v1>
+LOOP END
+
+LOOP BEGIN at tools/util.cc(118,3)
+<Multiversioned v1>
+   remark #15300: LOOP WAS VECTORIZED
+LOOP END
+
+LOOP BEGIN at tools/util.cc(118,3)
+<Alternate Alignment Vectorized Loop, Multiversioned v1>
+LOOP END
+
+LOOP BEGIN at tools/util.cc(118,3)
+<Remainder loop for vectorization, Multiversioned v1>
+LOOP END
+
+LOOP BEGIN at tools/util.cc(118,3)
+<Multiversioned v2>
+LOOP END
+
+LOOP BEGIN at tools/util.cc(118,3)
+<Remainder, Multiversioned v2>
+LOOP END
+===========================================================================
+
+Begin optimization report for: arrayEqualPartition64(long *, int, int, int *)
+
+    Report from: Vector optimizations [vec]
+
+
+LOOP BEGIN at tools/util.cc(126,3)
+   remark #25460: No loop optimizations reported
+
+   LOOP BEGIN at /usr/include/c++/4.8.5/bits/stl_algo.h(2487,7) inlined into tools/util.cc(129,19)
+      remark #25460: No loop optimizations reported
+   LOOP END
+LOOP END
+===========================================================================
+
+Begin optimization report for: arrayEqualPartition(int *, int, int, int *)
+
+    Report from: Vector optimizations [vec]
+
+
+LOOP BEGIN at tools/util.cc(140,3)
+   remark #25460: No loop optimizations reported
+
+   LOOP BEGIN at /usr/include/c++/4.8.5/bits/stl_algo.h(2487,7) inlined into tools/util.cc(143,18)
+      remark #25460: No loop optimizations reported
+   LOOP END
+LOOP END
+===========================================================================
+
+Begin optimization report for: permutationTranspose(const int *, int)
+
+    Report from: Vector optimizations [vec]
+
+
+LOOP BEGIN at tools/util.cc(164,3)
+   remark #25460: No loop optimizations reported
+LOOP END
+
+LOOP BEGIN at tools/util.cc(164,3)
+<Remainder>
+LOOP END
+===========================================================================

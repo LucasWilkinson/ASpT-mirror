@@ -1,0 +1,72 @@
+INTEL_PATH=/opt/intel/compilers_and_libraries_2018.3.222/linux/
+MKL_FLAGS=-m64 -w -I"/opt/intel/compilers_and_libraries_2018.3.222/linux/mkl/include"
+
+include ../config.mk
+CC = icpc
+NVCC = nvcc
+
+arch=intel64
+ifeq ($(hasMIC), 2)
+arch=mic
+endif
+MKL_LDFLAGS=-Wl,--start-group "$(INTEL_PATH)/mkl/lib/$(arch)/libmkl_intel_lp64.a" "$(INTEL_PATH)/mkl/lib/$(arch)/libmkl_intel_thread.a" "$(INTEL_PATH)/mkl/lib/$(arch)/libmkl_core.a" -Wl,--end-group -lpthread -lm 
+#MKL_LDFLAGS=-Wl,--start-group "$(INTEL_PATH)/mkl/lib/$(arch)/libmkl_intel_lp64.a" "$(INTEL_PATH)/mkl/lib/$(arch)/libmkl_intel_thread.a" "$(INTEL_PATH)/mkl/lib/$(arch)/libmkl_core.a" -Wl,--end-group -lpthread -lm -I/opt/software/papi/5.4.1/include -L/opt/software/papi/5.4.1/lib -lpapi 
+
+GPERF_HOME=/home/niuq/tools/gperftools-2.1/build
+GPERF_FLAGS=-I$(GPERF_HOME)/include
+GPERF_LDFLAGS=$(GPERF_HOME)/lib/libprofiler.a $(GPERF_HOME)/lib/libtcmalloc.a
+
+# What optimization level to use
+#OPTFLAGS = -fast -openmp
+OPTFLAGS = -O3 -qopenmp -vec-report1 -restrict -pthread #-Dprofiling #-DAGGR
+
+LIBDIR=nlibs
+LIBNAME=libnrmcl.a
+
+# What options to be used by the compiler
+COPTIONS= -Wno-write-strings -g -std=c++0x
+#COPTIONS =  -Wall -g
+#COPTIONS = -g
+#COPTIONS = -Wno-write-strings
+
+CUDA_HOME = $(shell cd "$(shell dirname `which nvcc`)/.." && pwd)
+CINCLUDES = -I.
+
+# What options to be used by the loader
+#LDOPTIONS = -L$(CUDA_HOME)/lib -lcudart -Wl,-rpath,$(CUDA_HOME)/lib 
+ifeq ($(hasGPU), 1)
+OPTFLAGS+=-Denable_gpu
+LDOPTIONS= -L$(CUDA_HOME)/lib64 -Wl,-rpath,$(CUDA_HOME)/lib64 -lcudart -lcusparse
+CINCLUDES+= -I$(CUDA_HOME)/include
+endif
+
+ifeq ($(hasCILK), 1)
+OPTFLAGS+=-Denable_cilk
+endif
+
+ifeq ($(hasMKL), 1)
+OPTFLAGS+=-Denable_mkl $(MKL_FLAGS)
+LDOPTIONS+= $(MKL_LDFLAGS)
+endif
+# What archiving to use
+AR = ar rv
+ifeq ($(hasMIC), 1)
+AR = xiar -qoffload-build rcs
+OPTFLAGS+=-DUSE_MIC -opt-report-phase=offload
+endif
+ifeq ($(hasMIC), 2)
+OPTFLAGS+=-mmic
+LDOPTIONS+=-mmic
+endif
+ifeq ($(hasPAPI), 1)
+PAPI_HOME=$(shell cd "$(shell dirname `which papi_version`)/.." && pwd)
+OPTFLAGS+=-I$(PAPI_HOME)/include
+LDOPTIONS+=$(PAPI_HOME)/lib/libpapi.a
+endif
+
+# What to use for indexing the archive
+RANLIB = ranlib
+#RANLIB = ar -ts
+#RANLIB = 
+
+

@@ -1,0 +1,108 @@
+Intel(R) Advisor can now assist with vectorization and show optimization
+  report messages with your source code.
+See "https://software.intel.com/en-us/intel-advisor-xe" for details.
+
+
+Begin optimization report for: pass1_scalar(int *, int *, int)
+
+    Report from: Vector optimizations [vec]
+
+
+LOOP BEGIN at tools/prefixSum.cc(12,3)
+   remark #25460: No loop optimizations reported
+LOOP END
+
+LOOP BEGIN at tools/prefixSum.cc(12,3)
+<Remainder>
+LOOP END
+===========================================================================
+
+Begin optimization report for: pass2_scalar(int *, int, int)
+
+    Report from: Vector optimizations [vec]
+
+
+LOOP BEGIN at tools/prefixSum.cc(26,3)
+<Peeled loop for vectorization>
+LOOP END
+
+LOOP BEGIN at tools/prefixSum.cc(26,3)
+   remark #15300: LOOP WAS VECTORIZED
+LOOP END
+
+LOOP BEGIN at tools/prefixSum.cc(26,3)
+<Remainder loop for vectorization>
+LOOP END
+===========================================================================
+
+Begin optimization report for: noTileOmpPrefixSum(int *, int *, int)
+
+    Report from: Vector optimizations [vec]
+
+
+LOOP BEGIN at tools/prefixSum.cc(12,3) inlined into tools/prefixSum.cc(42,25)
+   remark #25460: No loop optimizations reported
+LOOP END
+
+LOOP BEGIN at tools/prefixSum.cc(12,3) inlined into tools/prefixSum.cc(42,25)
+<Remainder>
+LOOP END
+
+LOOP BEGIN at tools/prefixSum.cc(47,9)
+   remark #25460: No loop optimizations reported
+LOOP END
+
+LOOP BEGIN at tools/prefixSum.cc(47,9)
+<Remainder>
+LOOP END
+
+LOOP BEGIN at tools/prefixSum.cc(26,3) inlined into tools/prefixSum.cc(54,7)
+<Peeled loop for vectorization>
+LOOP END
+
+LOOP BEGIN at tools/prefixSum.cc(26,3) inlined into tools/prefixSum.cc(54,7)
+   remark #15300: LOOP WAS VECTORIZED
+LOOP END
+
+LOOP BEGIN at tools/prefixSum.cc(26,3) inlined into tools/prefixSum.cc(54,7)
+<Remainder loop for vectorization>
+LOOP END
+===========================================================================
+
+Begin optimization report for: ompPrefixSum(int *, int *, int)
+
+    Report from: Vector optimizations [vec]
+
+
+LOOP BEGIN at tools/prefixSum.cc(74,5)
+   remark #25460: No loop optimizations reported
+
+   LOOP BEGIN at tools/prefixSum.cc(12,3) inlined into tools/prefixSum.cc(84,29)
+      remark #25460: No loop optimizations reported
+   LOOP END
+
+   LOOP BEGIN at tools/prefixSum.cc(12,3) inlined into tools/prefixSum.cc(84,29)
+   <Remainder>
+   LOOP END
+
+   LOOP BEGIN at tools/prefixSum.cc(89,9)
+      remark #25460: No loop optimizations reported
+   LOOP END
+
+   LOOP BEGIN at tools/prefixSum.cc(89,9)
+   <Remainder>
+   LOOP END
+
+   LOOP BEGIN at tools/prefixSum.cc(26,3) inlined into tools/prefixSum.cc(96,7)
+   <Peeled loop for vectorization>
+   LOOP END
+
+   LOOP BEGIN at tools/prefixSum.cc(26,3) inlined into tools/prefixSum.cc(96,7)
+      remark #15300: LOOP WAS VECTORIZED
+   LOOP END
+
+   LOOP BEGIN at tools/prefixSum.cc(26,3) inlined into tools/prefixSum.cc(96,7)
+   <Remainder loop for vectorization>
+   LOOP END
+LOOP END
+===========================================================================

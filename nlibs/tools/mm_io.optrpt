@@ -1,0 +1,13 @@
+Intel(R) Advisor can now assist with vectorization and show optimization
+  report messages with your source code.
+See "https://software.intel.com/en-us/intel-advisor-xe" for details.
+
+
+Begin optimization report for: mm_read_banner(FILE *, MM_typecode *)
+
+    Report from: Vector optimizations [vec]
+
+
+LOOP BEGIN at tools/mm_io.cc(81,5)
+LOOP END
+===========================================================================

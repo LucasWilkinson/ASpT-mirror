@@ -1,0 +1,6 @@
+[submodule "BIDMach"]
+	path = BIDMach
+	url = https://github.com/BIDData/BIDMach.git
+[submodule "merge-spmm"]
+	path = merge-spmm
+	url = https://github.com/owensgroup/merge-spmm.git

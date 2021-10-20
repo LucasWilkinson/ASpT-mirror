@@ -1,0 +1,80 @@
+Intel(R) Advisor can now assist with vectorization and show optimization
+  report messages with your source code.
+See "https://software.intel.com/en-us/intel-advisor-xe" for details.
+
+
+Begin optimization report for: outputStats(const std::vector<int, std::allocator<int>> &)
+
+    Report from: Vector optimizations [vec]
+
+
+LOOP BEGIN at tools/stats.cc(17,25)
+   remark #15300: LOOP WAS VECTORIZED
+LOOP END
+
+LOOP BEGIN at tools/stats.cc(17,25)
+<Remainder loop for vectorization>
+LOOP END
+===========================================================================
+
+Begin optimization report for: flopsStats(std::vector<int, std::allocator<int>> *, const int *, const int *, const float *, int, const int *, const int *, const float *, int, int, int, int)
+
+    Report from: Vector optimizations [vec]
+
+
+LOOP BEGIN at tools/stats.cc(33,3)
+   remark #25460: No loop optimizations reported
+
+   LOOP BEGIN at tools/stats.cc(35,5)
+      remark #25460: No loop optimizations reported
+   LOOP END
+
+   LOOP BEGIN at tools/stats.cc(35,5)
+   <Remainder>
+   LOOP END
+
+   LOOP BEGIN at tools/stats.cc(4,38) inlined into tools/stats.cc(40,5)
+      remark #25460: No loop optimizations reported
+   LOOP END
+LOOP END
+===========================================================================
+
+Begin optimization report for: std::vector<int, std::allocator<int>>::vector(std::vector<int, std::allocator<int>> *, std::vector<int, std::allocator<int>>::size_type, const std::vector<int, std::allocator<int>>::value_type &, const std::vector<int, std::allocator<int>>::allocator_type &)
+
+    Report from: Vector optimizations [vec]
+
+
+LOOP BEGIN at /usr/include/c++/4.8.5/bits/stl_algobase.h(749,7) inlined into /usr/include/c++/4.8.5/bits/stl_vector.h(285,9)
+<Peeled loop for vectorization>
+LOOP END
+
+LOOP BEGIN at /usr/include/c++/4.8.5/bits/stl_algobase.h(749,7) inlined into /usr/include/c++/4.8.5/bits/stl_vector.h(285,9)
+   remark #15300: LOOP WAS VECTORIZED
+LOOP END
+
+LOOP BEGIN at /usr/include/c++/4.8.5/bits/stl_algobase.h(749,7) inlined into /usr/include/c++/4.8.5/bits/stl_vector.h(285,9)
+<Remainder loop for vectorization>
+LOOP END
+===========================================================================
+
+Begin optimization report for: flopsStatsRows(std::vector<int, std::allocator<int>> *, const int *, const int *, const float *, int, const int *, const int *, const float *, int, int, int, int)
+
+    Report from: Vector optimizations [vec]
+
+
+LOOP BEGIN at tools/stats.cc(50,3)
+   remark #25460: No loop optimizations reported
+
+   LOOP BEGIN at tools/stats.cc(52,5)
+      remark #25460: No loop optimizations reported
+   LOOP END
+
+   LOOP BEGIN at tools/stats.cc(52,5)
+   <Remainder>
+   LOOP END
+
+   LOOP BEGIN at tools/stats.cc(4,38) inlined into tools/stats.cc(57,5)
+      remark #25460: No loop optimizations reported
+   LOOP END
+LOOP END
+===========================================================================
