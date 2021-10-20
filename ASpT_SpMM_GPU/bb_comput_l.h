@@ -23,6 +23,7 @@
 
 #include <thrust/device_ptr.h>
 #include <thrust/scan.h>
+#include "shfl_fix.h"
 
 __device__
 int binary_search(int *blk_stat, int bin_size, int gid, int blk_num)

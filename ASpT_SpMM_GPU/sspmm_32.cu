@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include "bb_segsort.h"
+#include "shfl_fix.h"
 //#include <cub/cub.cuh>
 
 #define ERR fprintf(stderr, "ERR\n");
@@ -23,13 +24,13 @@
 #define INIT_GRP (10000000)
 #define INIT_LIST (-2147483648)
 #define THRESHOLD (8*2)
-#define BH (128/1)
-#define BW (128*2)
+#define PANEL_SIZE (128/1)	// BLOCK HEIGHT?
+#define BW (128*2)	// BLOCK WIDTH?
 #define MIN_OCC (BW*3/4)
 //#define MIN_OCC (BW/4)
 //#define BW (
-#define SBSIZE (1024/8)
-#define SBF (SBSIZE / 32)
+#define SPARSE_BLOCK_SIZE (1024/8)		// SPARSE_BLOCK_SIZE?
+#define SPARSE_BLOCK_SIZE_F (SPARSE_BLOCK_SIZE / 32)
 #define DBSIZE (1024)
 #define DBF (DBSIZE / 32)
 #define SPBSIZE (256)
@@ -37,6 +38,8 @@
 #define STHRESHOLD (1024/2*1)
 #define SSTRIDE (STHRESHOLD / SPBF)
 #define SC_SIZE (2048)
+
+#define BIT_MASK(n) ((1 << n) - 1) 		// Set the first n bits to 1
 
 //#define SIM_VALUE
 
@@ -53,6 +56,31 @@
 	free(tt1);
 
 
+// TO Remove, just for debug purposes
+__global__ void print_kernel_state(
+	int nr, int sc, int *csr_row_ptrs, int *csr_col_idxs, FTYPE *csr_values, int *mcsr_panel_ptr, int *mcsr_tile_row_ptr, int *mcsr_list, FTYPE *vin, FTYPE *vout,
+  	int cap
+) {
+  int ele_printed = 0;
+  printf("csr: ");
+  for (int i = 0; i < nr; i++) {
+    for (int p = csr_row_ptrs[i]; p < csr_row_ptrs[i+1]; p++) {
+      printf("(%d, %d): %f, ", i, csr_col_idxs[p], csr_values[p]);
+      if (++ele_printed >= cap) break;
+    }
+	if (ele_printed >= cap) break;
+  }
+  printf("\n");
+  printf("mcsr_panel_ptr : ");
+  for (int i = 0; i < cap; i++) { printf("%d, ", mcsr_panel_ptr[i]); } printf("\n");
+  printf("mcsr_tile_row_ptr   : ");
+  for (int i = 0; i < cap; i++) { printf("%d, ", mcsr_tile_row_ptr[i]); } printf("\n");
+  printf("mcsr_list: ");
+  for (int i = 0; i < cap; i++) { printf("%d, ", mcsr_list[i]); } printf("\n");
+}
+
+
+
 int gran=1;
 
 struct v_struct {
@@ -66,13 +94,13 @@ struct v_struct *temp_v, *gold_temp_v;
 int sc, nr, nc, ne, gold_ne, npanel, mne, mne_nr;
 int nr0;
 
-int *csr_v; 
-int *csr_e0;
-FTYPE *csr_ev0;
+int *csr_row_ptrs; 
+int *csr_col_idxs0;
+FTYPE *csr_values0;
 
-//int *mcsr_v;
-int *mcsr_e; // can be short type
-int *mcsr_cnt;
+//int *mcsr_row_ptrs;
+int *mcsr_tile_row_ptr; // can be short type
+int *mcsr_panel_ptr;
 int *mcsr_list;
 
 int *baddr, *saddr;
@@ -130,8 +158,8 @@ void ready(int argc, char **argv)
         fscanf(fp, "%d %d %d", &nr, &nc, &ne);
         nr0 = nr;
         ne *= (sflag+1);
-        nr = CEIL(nr,BH)*BH;
-	npanel = CEIL(nr,BH);
+        nr = CEIL(nr,PANEL_SIZE)*PANEL_SIZE;
+	npanel = CEIL(nr,PANEL_SIZE);
 
         temp_v = (struct v_struct *)malloc(sizeof(struct v_struct)*(ne+1));
         gold_temp_v = (struct v_struct *)malloc(sizeof(struct v_struct)*(ne+1));
@@ -202,21 +230,21 @@ temp_v[i].val = 1.0f;
         }
         free(loc);
 
-        csr_v = (int *)malloc(sizeof(int)*(nr+1));
-        csr_e0 = (int *)malloc(sizeof(int)*ne+256);
-        csr_ev0 = (FTYPE *)malloc(sizeof(FTYPE)*ne+256);
-        memset(csr_v, 0, sizeof(int)*(nr+1));
+        csr_row_ptrs = (int *)malloc(sizeof(int)*(nr+1));
+        csr_col_idxs0 = (int *)malloc(sizeof(int)*ne+256);
+        csr_values0 = (FTYPE *)malloc(sizeof(FTYPE)*ne+256);
+        memset(csr_row_ptrs, 0, sizeof(int)*(nr+1));
 
         for(i=0;i<ne;i++) {
-                csr_e0[i] = temp_v[i].col;
-                csr_ev0[i] = temp_v[i].val;
-                csr_v[1+temp_v[i].row] = i+1;
+                csr_col_idxs0[i] = temp_v[i].col;
+                csr_values0[i] = temp_v[i].val;
+                csr_row_ptrs[1+temp_v[i].row] = i+1;
         }
 
         for(i=1;i<nr;i++) {
-                if(csr_v[i] == 0) csr_v[i] = csr_v[i-1];
+                if(csr_row_ptrs[i] == 0) csr_row_ptrs[i] = csr_row_ptrs[i-1];
         }
-        csr_v[nr] = ne;
+        csr_row_ptrs[nr] = ne;
 
         //fprintf(stdout,"TTAAGG,%s,%d,%d,%d,",argv[1],nr0,nc,ne);
 
@@ -224,108 +252,121 @@ temp_v[i].val = 1.0f;
 
 __global__
 //__launch_bounds__(BSIZE, 2048/BSIZE)
-void spmv_kernel32_sparse_v2(int sc, int *csr_v, int *csr_e, FTYPE *csr_ev, int *mcsr_cnt, int *mcsr_e, int *mcsr_list, FTYPE *vin, FTYPE *vout)
+void spmv_kernel32_sparse_v2(int sc, int *csr_row_ptrs, int *csr_col_idxs, FTYPE *csr_values, int *mcsr_panel_ptr, int *mcsr_tile_row_ptr, int *mcsr_list, FTYPE *vin, FTYPE *vout)
 {
-        int idx = (blockIdx.x*SBF)+(threadIdx.x>>5);// + (threadIdx.x>>(LOG_MFACTOR));
-        int lane = (threadIdx.x&(MFACTOR-1));
-        int offset = lane;
-        int i, j;
+	int idx = (blockIdx.x * SPARSE_BLOCK_SIZE_F) + (threadIdx.x>>5);
+	int lane = (threadIdx.x & (MFACTOR-1));
+	int i, j;
 
 	FTYPE r=0.0f;
-	int dummy = mcsr_cnt[idx/BH]*BH + ((idx&(BH-1))+1)*(mcsr_cnt[idx/BH+1] - mcsr_cnt[idx/BH]);
-	int loc1 = mcsr_e[dummy-1], loc2 = mcsr_e[dummy];
 
-        int buf; FTYPE buf2;
-        int interm = loc1 + (((loc2 - loc1)>>3)<<3);
-        int interm2 = loc1 + (((loc2 - loc1)>>2)<<2);
-        int interm3 = loc1 + (((loc2 - loc1)>>1)<<1);
+	const int block_start = idx / PANEL_SIZE;
+	const int block_start_offset = idx & (PANEL_SIZE-1);
+	const int num_tiles = mcsr_panel_ptr[block_start+1] - mcsr_panel_ptr[block_start];
+	
+	int ptr = mcsr_panel_ptr[block_start] * PANEL_SIZE + (block_start_offset + 1)*num_tiles;
+	int tile_row_part_start = mcsr_tile_row_ptr[ptr-1];
+	int tile_row_part_end = mcsr_tile_row_ptr[ptr];
 
-	int jj=0, l;	
-        for(l=loc1; l<interm; l+=8) {
-                if(jj == 0) {
-                        buf = csr_e[l+lane]*sc;
-                        buf2 = csr_ev[l+lane];
-                }
-		FTYPE v1 = __shfl(buf2, jj,MFACTOR);
-		FTYPE v2 = __shfl(buf2, jj+1,MFACTOR);
-		int i1 = __shfl(buf, jj,MFACTOR);
-		int i2 = __shfl(buf, jj+1,MFACTOR);
-                r += v1 * vin[i1+offset];
-                r += v2 * vin[i2+offset];
+	int v_ptr; FTYPE value;
 
-		FTYPE v3 = __shfl(buf2, jj+2,MFACTOR);
-		FTYPE v4 = __shfl(buf2, jj+3,MFACTOR);
-		int i3 = __shfl(buf, jj+2,MFACTOR);
-		int i4 = __shfl(buf, jj+3,MFACTOR);
-                r += v3 * vin[i3+offset];
-                r += v4 * vin[i4+offset];
+	int tile_row_part_end_8_element_aligned = tile_row_part_start + ((tile_row_part_end - tile_row_part_start) & ~BIT_MASK(3));
+	int tile_row_part_end_4_element_aligned = tile_row_part_start + ((tile_row_part_end - tile_row_part_start) & ~BIT_MASK(2));
+	int tile_row_part_end_2_element_aligned = tile_row_part_start + ((tile_row_part_end - tile_row_part_start) & ~BIT_MASK(1));
 
-		FTYPE v5 = __shfl(buf2, jj+4,MFACTOR);
-		FTYPE v6 = __shfl(buf2, jj+5,MFACTOR);
-		int i5 = __shfl(buf, jj+4,MFACTOR);
-		int i6 = __shfl(buf, jj+5,MFACTOR);
-                r += v5 * vin[i5+offset];
-                r += v6 * vin[i6+offset];
+	int jj=0, l;
+	for(l = tile_row_part_start; l < tile_row_part_end_8_element_aligned; l+=8) {
+		if(jj == 0) {
+			v_ptr = csr_col_idxs[l + lane] * sc;
+			value = csr_values[l + lane];
+		}
+		
+		FTYPE v1 = __shfl(value, jj,   MFACTOR);
+		FTYPE v2 = __shfl(value, jj+1, MFACTOR);
+		int i1 = __shfl(v_ptr, jj,   MFACTOR);
+		int i2 = __shfl(v_ptr, jj+1, MFACTOR);
 
-		FTYPE v7 = __shfl(buf2, jj+6,MFACTOR);
-		FTYPE v8 = __shfl(buf2, jj+7,MFACTOR);
-		int i7 = __shfl(buf, jj+6,MFACTOR);
-		int i8 = __shfl(buf, jj+7,MFACTOR);
-                r += v7 * vin[i7+offset];
-                r += v8 * vin[i8+offset];
+		r += v1 * vin[i1 + lane];
+		r += v2 * vin[i2 + lane];
 
-                jj = ((jj+8)&(MFACTOR-1));
-        }
-        if(interm < loc2 && jj == 0) {
-                buf = csr_e[l+lane]*sc;
-                buf2 = csr_ev[l+lane];
-        }
-        if(interm < interm2) {
-		FTYPE v1 = __shfl(buf2, jj,MFACTOR);
-		FTYPE v2 = __shfl(buf2, jj+1,MFACTOR);
-		int i1 = __shfl(buf, jj,MFACTOR);
-		int i2 = __shfl(buf, jj+1,MFACTOR);
-                r += v1 * vin[i1+offset];
-                r += v2 * vin[i2+offset];
+		FTYPE v3 = __shfl(value, jj+2, MFACTOR);
+		FTYPE v4 = __shfl(value, jj+3, MFACTOR);
+		int i3 = __shfl(v_ptr, jj+2, MFACTOR);
+		int i4 = __shfl(v_ptr, jj+3, MFACTOR);
+		r += v3 * vin[i3 + lane];
+		r += v4 * vin[i4 + lane];
 
-		FTYPE v3 = __shfl(buf2, jj+2,MFACTOR);
-		FTYPE v4 = __shfl(buf2, jj+3,MFACTOR);
-		int i3 = __shfl(buf, jj+2,MFACTOR);
-		int i4 = __shfl(buf, jj+3,MFACTOR);
-                r += v3 * vin[i3+offset];
-                r += v4 * vin[i4+offset];
+		FTYPE v5 = __shfl(value, jj+4, MFACTOR);
+		FTYPE v6 = __shfl(value, jj+5, MFACTOR);
+		int i5 = __shfl(v_ptr, jj+4, MFACTOR);
+		int i6 = __shfl(v_ptr, jj+5, MFACTOR);
+		r += v5 * vin[i5 + lane];
+		r += v6 * vin[i6 + lane];
+
+		FTYPE v7 = __shfl(value, jj+6, MFACTOR);
+		FTYPE v8 = __shfl(value, jj+7, MFACTOR);
+		int i7 = __shfl(v_ptr, jj+6, MFACTOR);
+		int i8 = __shfl(v_ptr, jj+7, MFACTOR);
+		r += v7 * vin[i7 + lane];
+		r += v8 * vin[i8 + lane];
+
+		jj = ((jj + 8) & (MFACTOR-1));
+	}
+
+	if(tile_row_part_end_8_element_aligned < tile_row_part_end && jj == 0) {
+		v_ptr = csr_col_idxs[l + lane]*sc;
+		value = csr_values[l + lane];
+	}
+
+	if(tile_row_part_end_8_element_aligned < tile_row_part_end_4_element_aligned) {
+		FTYPE v1 = __shfl(value, jj,   MFACTOR);
+		FTYPE v2 = __shfl(value, jj+1, MFACTOR);
+		int i1 = __shfl(v_ptr, jj,   MFACTOR);
+		int i2 = __shfl(v_ptr, jj+1, MFACTOR);
+		r += v1 * vin[i1 + lane];
+		r += v2 * vin[i2 + lane];
+
+		FTYPE v3 = __shfl(value, jj+2, MFACTOR);
+		FTYPE v4 = __shfl(value, jj+3, MFACTOR);
+		int i3 = __shfl(v_ptr, jj+2, MFACTOR);
+		int i4 = __shfl(v_ptr, jj+3, MFACTOR);
+		r += v3 * vin[i3 + lane];
+		r += v4 * vin[i4 + lane];
 
 
-                jj = (jj+4);
-        }
-        if(interm2 < interm3) {
-		FTYPE v1 = __shfl(buf2, jj,MFACTOR);
-		FTYPE v2 = __shfl(buf2, jj+1,MFACTOR);
-		int i1 = __shfl(buf, jj,MFACTOR);
-		int i2 = __shfl(buf, jj+1,MFACTOR);
-                r += v1 * vin[i1+offset];
-                r += v2 * vin[i2+offset];
+		jj = (jj+4);
+	}
 
-                jj = (jj+2);
-        }
-        if(interm3 < loc2) {
-                r += __shfl(buf2, jj,MFACTOR) * vin[__shfl(buf, jj,MFACTOR) + offset];
-        }
-	atomicAdd(&vout[idx*sc + offset], r);
+	if(tile_row_part_end_4_element_aligned < tile_row_part_end_2_element_aligned) {
+		FTYPE v1 = __shfl(value, jj,   MFACTOR);
+		FTYPE v2 = __shfl(value, jj+1, MFACTOR);
+		int i1 = __shfl(v_ptr, jj,   MFACTOR);
+		int i2 = __shfl(v_ptr, jj+1, MFACTOR);
+		r += v1 * vin[i1 + lane];
+		r += v2 * vin[i2 + lane];
+
+		jj = (jj+2);
+	}
+
+	if(tile_row_part_end_2_element_aligned < tile_row_part_end) {
+		r += __shfl(value, jj, MFACTOR) * vin[__shfl(v_ptr, jj, MFACTOR) + lane];
+	}
+
+	atomicAdd(&vout[idx*sc + lane], r);
 }
 
 __global__
 //__launch_bounds__(BSIZE, 2048/BSIZE)
-void spmv_kernel32_sparse_v2l(int sc, int *csr_v, int *csr_e, FTYPE *csr_ev, int *mcsr_cnt, int *mcsr_e, int *mcsr_list, FTYPE *vin, FTYPE *vout)
+void spmv_kernel32_sparse_v2l(int sc, int *csr_row_ptrs, int *csr_col_idxs, FTYPE *csr_values, int *mcsr_panel_ptr, int *mcsr_tile_row_ptr, int *mcsr_list, FTYPE *vin, FTYPE *vout)
 {
-        int idx = (blockIdx.x*SBF)+(threadIdx.x>>5);// + (threadIdx.x>>(LOG_MFACTOR));
+        int idx = (blockIdx.x*SPARSE_BLOCK_SIZE_F)+(threadIdx.x>>5);// + (threadIdx.x>>(LOG_MFACTOR));
         int lane = (threadIdx.x&(MFACTOR-1));
         int offset = lane;
         int i, j;
 
 	FTYPE r=0.0f;
-	int dummy = mcsr_cnt[idx/BH]*BH + ((idx&(BH-1))+1)*(mcsr_cnt[idx/BH+1] - mcsr_cnt[idx/BH]);
-	int loc1 = mcsr_e[dummy-1], loc2 = mcsr_e[dummy];
+	int dummy = mcsr_panel_ptr[idx/PANEL_SIZE]*PANEL_SIZE + ((idx&(PANEL_SIZE-1))+1)*(mcsr_panel_ptr[idx/PANEL_SIZE+1] - mcsr_panel_ptr[idx/PANEL_SIZE]);
+	int loc1 = mcsr_tile_row_ptr[dummy-1], loc2 = mcsr_tile_row_ptr[dummy];
 
 	loc1 += ((loc2 - loc1)/STHRESHOLD)*STHRESHOLD;
         int buf; FTYPE buf2;
@@ -336,8 +377,8 @@ void spmv_kernel32_sparse_v2l(int sc, int *csr_v, int *csr_e, FTYPE *csr_ev, int
 	int jj=0, l;	
         for(l=loc1; l<interm; l+=8) {
                 if(jj == 0) {
-                        buf = csr_e[l+lane]*sc;
-                        buf2 = csr_ev[l+lane];
+                        buf = csr_col_idxs[l+lane]*sc;
+                        buf2 = csr_values[l+lane];
                 }
 		FTYPE v1 = __shfl(buf2, jj,MFACTOR);
 		FTYPE v2 = __shfl(buf2, jj+1,MFACTOR);
@@ -370,8 +411,8 @@ void spmv_kernel32_sparse_v2l(int sc, int *csr_v, int *csr_e, FTYPE *csr_ev, int
                 jj = ((jj+8)&(MFACTOR-1));
         }
         if(interm < loc2 && jj == 0) {
-                buf = csr_e[l+lane]*sc;
-                buf2 = csr_ev[l+lane];
+                buf = csr_col_idxs[l+lane]*sc;
+                buf2 = csr_values[l+lane];
         }
         if(interm < interm2) {
 		FTYPE v1 = __shfl(buf2, jj,MFACTOR);
@@ -409,7 +450,7 @@ void spmv_kernel32_sparse_v2l(int sc, int *csr_v, int *csr_e, FTYPE *csr_ev, int
 
 __global__
 //__launch_bounds__(BSIZE, 2048/BSIZE)
-void spmv_kernel32_sparse_v2h(int sc, int *csr_v, int *csr_e, FTYPE *csr_ev, int *mcsr_cnt, int *mcsr_e, int *mcsr_list, FTYPE *vin, FTYPE *vout, int *special, int *special2)
+void spmv_kernel32_sparse_v2h(int sc, int *csr_row_ptrs, int *csr_col_idxs, FTYPE *csr_values, int *mcsr_panel_ptr, int *mcsr_tile_row_ptr, int *mcsr_list, FTYPE *vin, FTYPE *vout, int *special, int *special2)
 {
         int idx = special[blockIdx.x];// + (threadIdx.x>>(LOG_MFACTOR));
         int lane = (threadIdx.x&(MFACTOR-1));
@@ -418,9 +459,9 @@ void spmv_kernel32_sparse_v2h(int sc, int *csr_v, int *csr_e, FTYPE *csr_ev, int
 
 	FTYPE r=0.0f;
 
-	int dummy = mcsr_cnt[idx/BH]*BH + ((idx&(BH-1))+1)*(mcsr_cnt[idx/BH+1] - mcsr_cnt[idx/BH]);
+	int dummy = mcsr_panel_ptr[idx/PANEL_SIZE]*PANEL_SIZE + ((idx&(PANEL_SIZE-1))+1)*(mcsr_panel_ptr[idx/PANEL_SIZE+1] - mcsr_panel_ptr[idx/PANEL_SIZE]);
 
-	int loc1 = mcsr_e[dummy-1] + special2[blockIdx.x] + ((threadIdx.x>>5)*SSTRIDE);
+	int loc1 = mcsr_tile_row_ptr[dummy-1] + special2[blockIdx.x] + ((threadIdx.x>>5)*SSTRIDE);
 
 	__shared__ FTYPE sout[SPBSIZE];
 
@@ -429,8 +470,8 @@ void spmv_kernel32_sparse_v2h(int sc, int *csr_v, int *csr_e, FTYPE *csr_ev, int
 
         for(l=loc1; l<loc1+SSTRIDE; l+=8) {
                 if(jj == 0) {
-                        buf = csr_e[l+lane]*sc;
-                        buf2 = csr_ev[l+lane];
+                        buf = csr_col_idxs[l+lane]*sc;
+                        buf2 = csr_values[l+lane];
                 }
 		FTYPE v1 = __shfl(buf2, jj,MFACTOR);
 		FTYPE v2 = __shfl(buf2, jj+1,MFACTOR);
@@ -481,23 +522,23 @@ void spmv_kernel32_sparse_v2h(int sc, int *csr_v, int *csr_e, FTYPE *csr_ev, int
 
 __global__
 //__launch_bounds__(BSIZE, 2048/BSIZE)
-void spmv_kernel32_ssparse(int sc, int *csr_v, int *csr_e, FTYPE *csr_ev, int *mcsr_cnt, int *mcsr_e, int *mcsr_list, FTYPE *vin, FTYPE *vout)
+void spmv_kernel32_ssparse(int sc, int *csr_row_ptrs, int *csr_col_idxs, FTYPE *csr_values, int *mcsr_panel_ptr, int *mcsr_tile_row_ptr, int *mcsr_list, FTYPE *vin, FTYPE *vout)
 {
-        int idx = (blockIdx.x*SBF)+(threadIdx.x>>5);// + (threadIdx.x>>(LOG_MFACTOR));
+        int idx = (blockIdx.x*SPARSE_BLOCK_SIZE_F)+(threadIdx.x>>5);// + (threadIdx.x>>(LOG_MFACTOR));
         int lane = (threadIdx.x&(MFACTOR-1));
         int offset = lane;
         int i, j;
 
 	FTYPE r=0.0f;
-	int loc1 = csr_v[idx], loc2 = csr_v[idx+1];
+	int loc1 = csr_row_ptrs[idx], loc2 = csr_row_ptrs[idx+1];
 
         int buf; FTYPE buf2;
         int interm3 = loc1 + (((loc2 - loc1)>>1)<<1);
 
 	int jj=0, l;
     if(loc2 - loc1 < 32) {
-        buf = csr_e[loc1+lane];
-        buf2 = csr_ev[loc1+lane];
+        buf = csr_col_idxs[loc1+lane];
+        buf2 = csr_values[loc1+lane];
 
         for(l=loc1; l<interm3; l+=2) {
 		FTYPE v1 = __shfl(buf2, jj,MFACTOR);
@@ -515,8 +556,8 @@ void spmv_kernel32_ssparse(int sc, int *csr_v, int *csr_e, FTYPE *csr_ev, int *m
     } else {
         for(l=loc1; l<interm3; l+=2) {
 		if(jj == 0) {
-		        buf = csr_e[l+lane];
-		        buf2 = csr_ev[l+lane];
+		        buf = csr_col_idxs[l+lane];
+		        buf2 = csr_values[l+lane];
 		}
 		FTYPE v1 = __shfl(buf2, jj,MFACTOR);
 		FTYPE v2 = __shfl(buf2, jj+1,MFACTOR);
@@ -528,8 +569,8 @@ void spmv_kernel32_ssparse(int sc, int *csr_v, int *csr_e, FTYPE *csr_ev, int *m
 		jj = ((jj+2)&(MFACTOR-1));
         }
         if(interm3 < loc2 && jj == 0) {
-                buf = csr_e[l+lane];
-                buf2 = csr_ev[l+lane];
+                buf = csr_col_idxs[l+lane];
+                buf2 = csr_values[l+lane];
         }
         if(interm3 < loc2) {
                 r += __shfl(buf2, jj,MFACTOR) * vin[__shfl(buf, jj,MFACTOR)*sc + offset];
@@ -544,7 +585,7 @@ void spmv_kernel32_ssparse(int sc, int *csr_v, int *csr_e, FTYPE *csr_ev, int *m
 
 __global__
 //__launch_bounds__(BSIZE, 2048/BSIZE)
-void spmv_kernel32_dense_v2(int sc, int *csr_v, int *csr_e, FTYPE *csr_ev, int *mcsr_cnt, int *mcsr_e, int *mcsr_list, FTYPE *vin, FTYPE *vout, int *baddr, int *saddr)
+void spmv_kernel32_dense_v2(int sc, int *csr_row_ptrs, int *csr_col_idxs, FTYPE *csr_values, int *mcsr_panel_ptr, int *mcsr_tile_row_ptr, int *mcsr_list, FTYPE *vin, FTYPE *vout, int *baddr, int *saddr)
 {
         int lane = (threadIdx.x&(MFACTOR-1));
         int offset = lane;
@@ -565,10 +606,10 @@ void spmv_kernel32_dense_v2(int sc, int *csr_v, int *csr_e, FTYPE *csr_ev, int *
         }
 	__syncthreads();
 
-    for(i=warp_id;i<BH;i+=(DBSIZE>>LOG_MFACTOR)) {
+    for(i=warp_id;i<PANEL_SIZE;i+=(DBSIZE>>LOG_MFACTOR)) {
         FTYPE r=0.0f;
-	int dummy = mcsr_cnt[base_addr]*BH + i*(mcsr_cnt[base_addr+1] - mcsr_cnt[base_addr]) + stride;
-        int loc1 = mcsr_e[dummy], loc2 = mcsr_e[dummy+1];
+	int dummy = mcsr_panel_ptr[base_addr]*PANEL_SIZE + i*(mcsr_panel_ptr[base_addr+1] - mcsr_panel_ptr[base_addr]) + stride;
+        int loc1 = mcsr_tile_row_ptr[dummy], loc2 = mcsr_tile_row_ptr[dummy+1];
 
         int buf; FTYPE buf2;
         int interm = loc1 + (((loc2 - loc1)>>3)<<3);
@@ -578,8 +619,8 @@ void spmv_kernel32_dense_v2(int sc, int *csr_v, int *csr_e, FTYPE *csr_ev, int *
         int jj=0, l;
         for(l=loc1; l<interm; l+=8) {
                 if(jj == 0) {
-                        buf = csr_e[l+lane]&(BW-1);
-                        buf2 = csr_ev[l+lane];
+                        buf = csr_col_idxs[l+lane]&(BW-1);
+                        buf2 = csr_values[l+lane];
                 }
 		FTYPE v1 = __shfl(buf2, jj,MFACTOR);
 		FTYPE v2 = __shfl(buf2, jj+1,MFACTOR);
@@ -612,8 +653,8 @@ void spmv_kernel32_dense_v2(int sc, int *csr_v, int *csr_e, FTYPE *csr_ev, int *
                 jj = ((jj+8)&(MFACTOR-1));
         }
         if(interm < loc2 && jj == 0) {
-                buf = csr_e[l+lane]&(BW-1);
-                buf2 = csr_ev[l+lane];
+                buf = csr_col_idxs[l+lane]&(BW-1);
+                buf2 = csr_values[l+lane];
         }
         if(interm < interm2) {
 		FTYPE v1 = __shfl(buf2, jj,MFACTOR);
@@ -645,18 +686,18 @@ void spmv_kernel32_dense_v2(int sc, int *csr_v, int *csr_e, FTYPE *csr_ev, int *
         if(interm3 < loc2) {
                 r += __shfl(buf2, jj,MFACTOR) * sin[__shfl(buf, jj,MFACTOR)][lane];
         }
-	atomicAdd(&vout[(base_addr*BH+i)*sc + offset], r); //if not 0?
+	atomicAdd(&vout[(base_addr*PANEL_SIZE+i)*sc + offset], r); //if not 0?
 
     }
 }
 
 #define ITER (128/128)
 
-__global__ void dense_block_detect(int *csr_v, int *mcsr_chk, int *csr_e0, int *flag)
+__global__ void dense_block_detect(int *csr_row_ptrs, int *mcsr_chk, int *csr_col_idxs0, int *flag)
 {
 	int i;
-	int lb = csr_v[blockIdx.x*BH];
-	int ub = csr_v[(blockIdx.x+1)*BH];
+	int lb = csr_row_ptrs[blockIdx.x*PANEL_SIZE];
+	int ub = csr_row_ptrs[(blockIdx.x+1)*PANEL_SIZE];
 	//__shared__ short scr_pad[SC_SIZE];
 	__shared__ int scr_pad[SC_SIZE];
 
@@ -665,7 +706,7 @@ __global__ void dense_block_detect(int *csr_v, int *mcsr_chk, int *csr_e0, int *
 	}
 	__syncthreads();
 	for(i=lb+threadIdx.x; i<ub; i+=blockDim.x) {
-		int key = (csr_e0[i]&(SC_SIZE-1));
+		int key = (csr_col_idxs0[i]&(SC_SIZE-1));
 		if(scr_pad[key] < THRESHOLD) atomicAdd(&scr_pad[key], 1);
 	}
 	__syncthreads();
@@ -682,7 +723,7 @@ __global__ void dense_block_detect(int *csr_v, int *mcsr_chk, int *csr_e0, int *
 	if((threadIdx.x & 31) == 0) scr_pad[threadIdx.x>>5] = r;
 	__syncthreads();
 	if(threadIdx.x == 0) {
-		for(i=1; i<BH/32; i++)
+		for(i=1; i<PANEL_SIZE/32; i++)
 			r += scr_pad[i];
 		if(r >= MIN_OCC) {
 			mcsr_chk[blockIdx.x] = 1;
@@ -692,32 +733,32 @@ __global__ void dense_block_detect(int *csr_v, int *mcsr_chk, int *csr_e0, int *
 }
 
 
-__global__ void simple_mcsr_cnt(int npanel, int *mcsr_cnt)
+__global__ void simple_mcsr_cnt(int npanel, int *mcsr_panel_ptr)
 {
 	int idx = blockIdx.x*blockDim.x + threadIdx.x;
-	if(idx < npanel) mcsr_cnt[idx] = idx;
+	if(idx < npanel) mcsr_panel_ptr[idx] = idx;
 }
 
-__global__ void csr_pivot_gen(int npanel, int *csr_v, int *csr_pivot)
+__global__ void csr_pivot_gen(int npanel, int *csr_row_ptrs, int *csr_pivot)
 {
 	int idx = blockIdx.x*blockDim.x + threadIdx.x;
 	if(idx < npanel) {
-		csr_pivot[idx] = csr_v[(idx)*BH];
+		csr_pivot[idx] = csr_row_ptrs[(idx)*PANEL_SIZE];
 	}
 }
 
-__global__ void csr_pnt_gen(int ne, int *csr_e0, int *key, STYPE *key2, int *val)
+__global__ void csr_pnt_gen(int ne, int *csr_col_idxs0, int *key, STYPE *key2, int *val)
 {
 	int idx = blockIdx.x*blockDim.x + threadIdx.x;
 	if(idx < ne) {
-		key[idx] = csr_e0[idx];
+		key[idx] = csr_col_idxs0[idx];
 		key2[idx] = 30000; 
 		val[idx] = idx;
 	}
 }
 
 #define MCSR_CNT_SIZE (1024)
-__global__ void mcsr_cnt_calc(int *csr_pivot, int *key, int *mcsr_cnt, int *mcsr_chk)
+__global__ void mcsr_cnt_calc(int *csr_pivot, int *key, int *mcsr_panel_ptr, int *mcsr_chk)
 {
 	if(mcsr_chk[blockIdx.x] == 0) return;
 	int lb = csr_pivot[blockIdx.x]+THRESHOLD-1;
@@ -743,21 +784,21 @@ __global__ void mcsr_cnt_calc(int *csr_pivot, int *key, int *mcsr_cnt, int *mcsr
 	}
 	__syncthreads();
 	if(threadIdx.x < MCSR_CNT_SIZE-1 && occ[threadIdx.x] >= MIN_OCC && occ[threadIdx.x+1] < MIN_OCC) {
-		mcsr_cnt[blockIdx.x+1] = threadIdx.x;
+		mcsr_panel_ptr[blockIdx.x+1] = threadIdx.x;
 	} 
 
 }
 
 #define LIST_CANDI (1024*4)
 
-__global__ void key2_marking(int *csr_pivot, int *key, STYPE *key2, int *val, int *mcsr_cnt, int *mcsr_list, int *baddr, int *saddr, int *mcsr_chk)
+__global__ void key2_marking(int *csr_pivot, int *key, STYPE *key2, int *val, int *mcsr_panel_ptr, int *mcsr_list, int *baddr, int *saddr, int *mcsr_chk)
 {
 	if(mcsr_chk[blockIdx.x] == 0) return;
 	int lb = csr_pivot[blockIdx.x]+THRESHOLD-1;
 	int ub = csr_pivot[blockIdx.x+1];
 	int uub = lb+CEIL(ub-lb,1024)*1024;
-	int bloc = (mcsr_cnt[blockIdx.x] - blockIdx.x)*BW;
-	int limit = mcsr_cnt[blockIdx.x+1] - mcsr_cnt[blockIdx.x] - 1;
+	int bloc = (mcsr_panel_ptr[blockIdx.x] - blockIdx.x)*BW;
+	int limit = mcsr_panel_ptr[blockIdx.x+1] - mcsr_panel_ptr[blockIdx.x] - 1;
 
 	__shared__ int age[BW];
 	__shared__ int list[LIST_CANDI];  
@@ -768,8 +809,8 @@ __global__ void key2_marking(int *csr_pivot, int *key, STYPE *key2, int *val, in
 	}
 	__syncthreads();
 	for(int i=threadIdx.x; i<limit; i+=blockDim.x) {
-		baddr[mcsr_cnt[blockIdx.x]-blockIdx.x+i] = blockIdx.x;
-		saddr[mcsr_cnt[blockIdx.x]-blockIdx.x+i] = threadIdx.x;
+		baddr[mcsr_panel_ptr[blockIdx.x]-blockIdx.x+i] = blockIdx.x;
+		saddr[mcsr_panel_ptr[blockIdx.x]-blockIdx.x+i] = threadIdx.x;
 	}
     for(int i0=lb+threadIdx.x; i0<uub; i0+=LIST_CANDI*THRESHOLD) {
 	if(threadIdx.x == 0) listp=0;
@@ -827,29 +868,29 @@ __global__ void fill_val(int ne, int *val)
 	}
 }
 
-__global__ void fill_mcsre(int *csr_v, int *mcsr_cnt, STYPE *key2, int *mcsr_e, int *rmv)
+__global__ void fill_mcsre(int *csr_row_ptrs, int *mcsr_panel_ptr, STYPE *key2, int *mcsr_tile_row_ptr, int *rmv)
 {
 	int idx = blockIdx.x*blockDim.x + threadIdx.x;
-	int delta = mcsr_cnt[blockIdx.x+1] - mcsr_cnt[blockIdx.x];
-	int bidx = mcsr_cnt[blockIdx.x]*BH + delta*threadIdx.x;
-	int i = csr_v[idx];
+	int delta = mcsr_panel_ptr[blockIdx.x+1] - mcsr_panel_ptr[blockIdx.x];
+	int bidx = mcsr_panel_ptr[blockIdx.x]*PANEL_SIZE + delta*threadIdx.x;
+	int i = csr_row_ptrs[idx];
 	//int lb, ub=key2[i];
         int kk = MIN(key2[i], delta-1);
-        if(i == csr_v[idx+1]) kk = delta-1;
+        if(i == csr_row_ptrs[idx+1]) kk = delta-1;
         for(int j = 0; j<=kk; j++)
-                mcsr_e[bidx+j] = csr_v[idx];
+                mcsr_tile_row_ptr[bidx+j] = csr_row_ptrs[idx];
 
-	for(; i<csr_v[idx+1]; i++) {
+	for(; i<csr_row_ptrs[idx+1]; i++) {
 		int lb = key2[i], ub = key2[i+1];
 		//lb = ub; ub = key2[i+1];
 		if(lb == 30000) break;
-		if(i == csr_v[idx+1]-1 || ub >= delta) ub = delta-1;
+		if(i == csr_row_ptrs[idx+1]-1 || ub >= delta) ub = delta-1;
 		for(int j = lb+1; j<=ub; j++) {
-			mcsr_e[bidx+j] = i+1;
+			mcsr_tile_row_ptr[bidx+j] = i+1;
 		}
 		
 	}
-	int r = (csr_v[idx+1] - mcsr_e[bidx+delta-1]);
+	int r = (csr_row_ptrs[idx+1] - mcsr_tile_row_ptr[bidx+delta-1]);
 	r += __shfl_down(r, 16);
 	r += __shfl_down(r, 8);
 	r += __shfl_down(r, 4);
@@ -858,20 +899,20 @@ __global__ void fill_mcsre(int *csr_v, int *mcsr_cnt, STYPE *key2, int *mcsr_e, 
 	if((threadIdx.x&31) == 0) atomicAdd(&rmv[(idx>>5)&127], r);
 }
 
-__global__ void porting(int ne, int *val, int *csr_e0, FTYPE *csr_ev0, int *csr_e, FTYPE *csr_ev)
+__global__ void porting(int ne, int *val, int *csr_col_idxs0, FTYPE *csr_values0, int *csr_col_idxs, FTYPE *csr_values)
 {
 	int idx = blockIdx.x*blockDim.x + threadIdx.x;
 	if(idx < ne) {
 		int k = val[idx];
-		csr_e[idx] = csr_e0[k];
-		csr_ev[idx] = csr_ev0[k];	
+		csr_col_idxs[idx] = csr_col_idxs0[k];
+		csr_values[idx] = csr_values0[k];	
 	}
 }
 
-__global__ void cal_vari(int nr, double avg, int *mcsr_cnt, int *mcsr_e, double *vari, int *special_bb)
+__global__ void cal_vari(int nr, double avg, int *mcsr_panel_ptr, int *mcsr_tile_row_ptr, double *vari, int *special_bb)
 {
-	int idx = (mcsr_cnt[blockIdx.x]*BH) + (mcsr_cnt[blockIdx.x+1] - mcsr_cnt[blockIdx.x])*(threadIdx.x+1);
-	int i2 = mcsr_e[idx] - mcsr_e[idx-1];
+	int idx = (mcsr_panel_ptr[blockIdx.x]*PANEL_SIZE) + (mcsr_panel_ptr[blockIdx.x+1] - mcsr_panel_ptr[blockIdx.x])*(threadIdx.x+1);
+	int i2 = mcsr_tile_row_ptr[idx] - mcsr_tile_row_ptr[idx-1];
 	double r = ((double)i2 - avg);
 	double r2 = r*r;
 
@@ -893,10 +934,10 @@ __global__ void cal_vari(int nr, double avg, int *mcsr_cnt, int *mcsr_e, double 
 }
 
 
-__global__ void make_special(int *mcsr_cnt, int *mcsr_e, int *special, int *special2, int *scnt)
+__global__ void make_special(int *mcsr_panel_ptr, int *mcsr_tile_row_ptr, int *special, int *special2, int *scnt)
 {
-	int idx = (mcsr_cnt[blockIdx.x]*BH) + (mcsr_cnt[blockIdx.x+1] - mcsr_cnt[blockIdx.x])*(threadIdx.x+1);
-	int i2 = (mcsr_e[idx] - mcsr_e[idx-1])/STHRESHOLD;
+	int idx = (mcsr_panel_ptr[blockIdx.x]*PANEL_SIZE) + (mcsr_panel_ptr[blockIdx.x+1] - mcsr_panel_ptr[blockIdx.x])*(threadIdx.x+1);
+	int i2 = (mcsr_tile_row_ptr[idx] - mcsr_tile_row_ptr[idx-1])/STHRESHOLD;
 	if(i2 > 0) {
 		int k = atomicAdd(&scnt[0], i2);
 		for(int i=k;i<k+i2;i++) {
@@ -911,20 +952,20 @@ void process()
 	FILE *fpo = fopen("SpMM_GPU_SP.out", "a");
 	int i, j;
 
-	int *_csr_v; int *_csr_e0; FTYPE *_csr_ev0;
-	int *_csr_e; FTYPE *_csr_ev;
+	int *_csr_row_ptrs; int *_csr_e0; FTYPE *_csr_values0;
+	int *_csr_e; FTYPE *_csr_values;
 
-        cudaMalloc((void **) &_csr_v, sizeof(int)*(nr+1));
-        cudaMalloc((void **) &_csr_e0, sizeof(int)*ne+256);
-        cudaMalloc((void **) &_csr_ev0, sizeof(FTYPE)*ne+256);
+	cudaMalloc((void **) &_csr_row_ptrs, sizeof(int)*(nr+1));
+	cudaMalloc((void **) &_csr_e0, sizeof(int)*ne+256);
+	cudaMalloc((void **) &_csr_values0, sizeof(FTYPE)*ne+256);
 
-        cudaMemset(_csr_v, 0, sizeof(int)*(nr+1));
-        cudaMemset(_csr_e0, 0, sizeof(int)*ne+256);
-        cudaMemset(_csr_ev0, 0, sizeof(FTYPE)*ne+256);
+	cudaMemset(_csr_row_ptrs, 0, sizeof(int)*(nr+1));
+	cudaMemset(_csr_e0, 0, sizeof(int)*ne+256);
+	cudaMemset(_csr_values0, 0, sizeof(FTYPE)*ne+256);
 
-        cudaMemcpy(_csr_v, csr_v, sizeof(int)*(nr+1), cudaMemcpyHostToDevice);
-        cudaMemcpy(_csr_e0, csr_e0, sizeof(int)*(ne+1), cudaMemcpyHostToDevice);
-        cudaMemcpy(_csr_ev0, csr_ev0, sizeof(FTYPE)*ne, cudaMemcpyHostToDevice);
+	cudaMemcpy(_csr_row_ptrs, csr_row_ptrs, sizeof(int)*(nr+1), cudaMemcpyHostToDevice);
+	cudaMemcpy(_csr_e0, csr_col_idxs0, sizeof(int)*(ne+1), cudaMemcpyHostToDevice);
+	cudaMemcpy(_csr_values0, csr_values0, sizeof(FTYPE)*ne, cudaMemcpyHostToDevice);
 
 
 
@@ -990,7 +1031,7 @@ void process()
 	cudaMalloc((void **) &_scnt, sizeof(int));
 	cudaMemset(_scnt, 0, sizeof(int));
 
-	int detect_nb = CEIL(nr, BH);
+	int detect_nb = CEIL(nr, PANEL_SIZE);
 	int d_flag[128];
 	int *_d_flag;
 	cudaMalloc((void **) &_d_flag, sizeof(int)*128);
@@ -1009,7 +1050,7 @@ void process()
         cudaMalloc((void **) &_val, sizeof(int)*ne+256);
 
 	int fill_nb = CEIL(ne, 128*4);
-	int mcsr_nb = CEIL(nr, BH);
+	int mcsr_nb = CEIL(nr, PANEL_SIZE);
 	int port_nb = CEIL(ne, 128);
 
 #define MCSR_CNT_TBSIZE (1024)
@@ -1030,7 +1071,7 @@ void process()
       	cudaDeviceSynchronize();
 	cudaEventRecord(pevent1,0);
 
-	dense_block_detect<<<detect_nb, BH>>>(_csr_v, _mcsr_chk, _csr_e0, _d_flag);
+	dense_block_detect<<<detect_nb, PANEL_SIZE>>>(_csr_row_ptrs, _mcsr_chk, _csr_e0, _d_flag);
 	
 	cudaMemcpy(d_flag, _d_flag, sizeof(int)*128, cudaMemcpyDeviceToHost); 
 
@@ -1042,13 +1083,13 @@ void process()
   if(d_flag[0] == 0) {
 	num_dense = 0;
 	avg = (double)ne / nr;
-	_mcsr_e = _csr_v;
+	_mcsr_e = _csr_row_ptrs;
 	_csr_e = _csr_e0;
-	_csr_ev = _csr_ev0;
+	_csr_values = _csr_values0;
 	simple_mcsr_cnt<<<pivot_gen_nb, 128>>>(npanel+1, _mcsr_cnt);
   } else {
 
-	csr_pivot_gen<<<pivot_gen_nb, 128, 0, stream1>>>(npanel+1, _csr_v, _csr_pivot);
+	csr_pivot_gen<<<pivot_gen_nb, 128, 0, stream1>>>(npanel+1, _csr_row_ptrs, _csr_pivot);
 	csr_pnt_gen<<<pnt_gen_nb, 128, 0, stream2>>>(ne+1, _csr_e0, _key, _key2, _val);
 
 #ifdef PP_TIME
@@ -1092,7 +1133,7 @@ cudaEventCreate(&pevent21);
 cudaDeviceSynchronize();
 cudaEventRecord(pevent11,0);
 #endif
-	bb_segsort(_key2, _val, ne, _csr_v, nr);
+	bb_segsort(_key2, _val, ne, _csr_row_ptrs, nr);
 #ifdef PP_TIME
 cudaEventRecord(pevent21,0);
 cudaEventSynchronize(pevent11);
@@ -1101,10 +1142,10 @@ cudaEventElapsedTime(&ptot_ms1, pevent11, pevent21);
 cudaDeviceSynchronize();
 printf("it2 : %f\n", ptot_ms1);
 #endif
-	fill_mcsre<<<mcsr_nb, BH>>>(_csr_v, _mcsr_cnt, _key2, _mcsr_e, _rmv);
+	fill_mcsre<<<mcsr_nb, PANEL_SIZE>>>(_csr_row_ptrs, _mcsr_cnt, _key2, _mcsr_e, _rmv);
 	
 	cudaMemcpy(rmv, _rmv, sizeof(int)*128, cudaMemcpyDeviceToHost);
-	cudaMemcpy(&_mcsr_e[BH*(num_dense+npanel)], &ne, sizeof(int), cudaMemcpyHostToDevice);
+	cudaMemcpy(&_mcsr_e[PANEL_SIZE*(num_dense+npanel)], &ne, sizeof(int), cudaMemcpyHostToDevice);
 	for(int i=1;i<128;i++) 
 		rmv[0] += rmv[i];
 	avg = (double)rmv[0] / nr;
@@ -1113,11 +1154,11 @@ printf("it2 : %f\n", ptot_ms1);
 	cudaFree(_key2);
 
         cudaMalloc((void **) &_csr_e, sizeof(int)*ne+256);
-        cudaMalloc((void **) &_csr_ev, sizeof(FTYPE)*ne+256);
+        cudaMalloc((void **) &_csr_values, sizeof(FTYPE)*ne+256);
 
-	porting<<<port_nb, 128>>>(ne, _val, _csr_e0, _csr_ev0, _csr_e, _csr_ev);
+	porting<<<port_nb, 128>>>(ne, _val, _csr_e0, _csr_values0, _csr_e, _csr_values);
   }
-	cal_vari<<<npanel, BH>>>(nr, avg, _mcsr_cnt, _mcsr_e, _vari, _special_bb);
+	cal_vari<<<npanel, PANEL_SIZE>>>(nr, avg, _mcsr_cnt, _mcsr_e, _vari, _special_bb);
 	cudaMemcpy(vari0, _vari, sizeof(double)*128, cudaMemcpyDeviceToHost);
 	for(int i=1;i<128;i++) { 
 		vari0[0] += vari0[i];
@@ -1132,8 +1173,8 @@ printf("it2 : %f\n", ptot_ms1);
 			special_p += special_bb[i];
 		}
 		cudaMalloc((void **) &_special, sizeof(int)*special_p);
-        	cudaMalloc((void **) &_special2, sizeof(int)*special_p);
-		make_special<<<npanel, BH>>>(_mcsr_cnt, _mcsr_e, _special, _special2, _scnt);
+		cudaMalloc((void **) &_special2, sizeof(int)*special_p);
+		make_special<<<npanel, PANEL_SIZE>>>(_mcsr_cnt, _mcsr_e, _special, _special2, _scnt);
 	}
 
 	cudaEventRecord(pevent2,0);
@@ -1146,10 +1187,10 @@ printf("it2 : %f\n", ptot_ms1);
 //printf("%f,", ptot_ms);
 
 	// process
-	dim3 s_gridsize(nr/SBF, 1, 1);
-	dim3 s_blocksize(SBSIZE, 1, 1);
-	dim3 ss_gridsize(nr/SBF, 1, 1);
-	dim3 ss_blocksize(SBSIZE, 1, 1);
+	dim3 s_gridsize(nr/SPARSE_BLOCK_SIZE_F, 1, 1);
+	dim3 s_blocksize(SPARSE_BLOCK_SIZE, 1, 1);
+	dim3 ss_gridsize(nr/SPARSE_BLOCK_SIZE_F, 1, 1);
+	dim3 ss_blocksize(SPARSE_BLOCK_SIZE, 1, 1);
 	dim3 d_gridsize(num_dense, 1, 1);
 	dim3 d_blocksize(DBSIZE, 1, 1);
 	dim3 s_gridsizeh(special_p, 1, 1);
@@ -1164,10 +1205,10 @@ printf("it2 : %f\n", ptot_ms1);
 if (ne/nc < 6 && vari < 40) { 
       	cudaDeviceSynchronize();
 	cudaEventRecord(event1,0);
-for(int ik=0;ik<ITER;ik++) {
-	// kernel fun
-        spmv_kernel32_ssparse<<<ss_gridsize, ss_blocksize, 0, stream1>>>(sc, _csr_v, _csr_e, _csr_ev, _mcsr_cnt, _mcsr_e, _mcsr_list, _vin, _vout);
-}
+	for(int ik=0;ik<ITER;ik++) {
+		// kernel fun
+			spmv_kernel32_ssparse<<<ss_gridsize, ss_blocksize, 0, stream1>>>(sc, _csr_row_ptrs, _csr_e, _csr_values, _mcsr_cnt, _mcsr_e, _mcsr_list, _vin, _vout);
+	}
 	cudaEventRecord(event2,0);
 	cudaEventSynchronize(event1);
 	cudaEventSynchronize(event2);
@@ -1175,13 +1216,13 @@ for(int ik=0;ik<ITER;ik++) {
 	cudaDeviceSynchronize();
 
 } else if (vari < 200) {
-       	cudaDeviceSynchronize();
+	cudaDeviceSynchronize();
 	cudaEventRecord(event1,0);
-for(int ik=0;ik<ITER;ik++) {
-	// kernel fun
-        spmv_kernel32_sparse_v2<<<s_gridsize, s_blocksize, 0, stream1>>>(sc, _csr_v, _csr_e, _csr_ev, _mcsr_cnt, _mcsr_e, _mcsr_list, _vin, _vout);
-        spmv_kernel32_dense_v2<<<d_gridsize, d_blocksize, 0, stream2>>>(sc, _csr_v, _csr_e, _csr_ev, _mcsr_cnt, _mcsr_e, _mcsr_list, _vin, _vout, _baddr, _saddr);
-}	
+	for(int ik=0;ik<ITER;ik++) {
+		// kernel fun
+		spmv_kernel32_sparse_v2<<<s_gridsize, s_blocksize, 0, stream1>>>(sc, _csr_row_ptrs, _csr_e, _csr_values, _mcsr_cnt, _mcsr_e, _mcsr_list, _vin, _vout);
+		spmv_kernel32_dense_v2<<<d_gridsize, d_blocksize, 0, stream2>>>(sc, _csr_row_ptrs, _csr_e, _csr_values, _mcsr_cnt, _mcsr_e, _mcsr_list, _vin, _vout, _baddr, _saddr);
+	}	
 	cudaEventRecord(event2,0);
 	cudaEventSynchronize(event1);
 	cudaEventSynchronize(event2);
@@ -1191,12 +1232,12 @@ for(int ik=0;ik<ITER;ik++) {
 	cudaDeviceSynchronize();
 	cudaEventRecord(event1,0);
 
-for(int ik=0;ik<ITER;ik++) {
-	// kernel fun
-        spmv_kernel32_sparse_v2l<<<s_gridsize, s_blocksize, 0, stream1>>>(sc, _csr_v, _csr_e, _csr_ev, _mcsr_cnt, _mcsr_e, _mcsr_list, _vin, _vout);
-        spmv_kernel32_sparse_v2h<<<s_gridsizeh, s_blocksizeh, 0, stream3>>>(sc, _csr_v, _csr_e, _csr_ev, _mcsr_cnt, _mcsr_e, _mcsr_list, _vin, _vout, _special, _special2);
-        spmv_kernel32_dense_v2<<<d_gridsize, d_blocksize, 0, stream2>>>(sc, _csr_v, _csr_e, _csr_ev, _mcsr_cnt, _mcsr_e, _mcsr_list, _vin, _vout, _baddr, _saddr);
-}	
+	for(int ik=0;ik<ITER;ik++) {
+		// kernel fun
+        spmv_kernel32_sparse_v2l<<<s_gridsize, s_blocksize, 0, stream1>>>(sc, _csr_row_ptrs, _csr_e, _csr_values, _mcsr_cnt, _mcsr_e, _mcsr_list, _vin, _vout);
+        spmv_kernel32_sparse_v2h<<<s_gridsizeh, s_blocksizeh, 0, stream3>>>(sc, _csr_row_ptrs, _csr_e, _csr_values, _mcsr_cnt, _mcsr_e, _mcsr_list, _vin, _vout, _special, _special2);
+        spmv_kernel32_dense_v2<<<d_gridsize, d_blocksize, 0, stream2>>>(sc, _csr_row_ptrs, _csr_e, _csr_values, _mcsr_cnt, _mcsr_e, _mcsr_list, _vin, _vout, _baddr, _saddr);
+	}	
 	cudaEventRecord(event2,0);
 	cudaEventSynchronize(event1);
 	cudaEventSynchronize(event2);
@@ -1260,4 +1301,3 @@ int main(int argc, char **argv)
 	//gen_structure();
 	process();
 }
-
